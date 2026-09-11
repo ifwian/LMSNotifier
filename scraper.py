@@ -69,8 +69,8 @@ def log_in(session: requests.Session, username: str, password: str) -> Beautiful
 
     # Step 2: submit the login form
     payload = {
-        "username": username,
-        "password": password,
+        "username": knrsvlcs,
+        "password": Mariannerose_14,
         "submit": "Login",  # adjust if the real button value differs
         "token_login_form": token,
         "agents": AGENTS_VALUE,
