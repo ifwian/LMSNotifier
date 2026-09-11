@@ -49,13 +49,12 @@ HEADERS = {
 
 
 def log_in(session: requests.Session, username: str, password: str) -> BeautifulSoup:
-    """Load the login page, grab the CSRF token, submit credentials.
+    """Load the login page, grab the CSRF token, submit credentials."""
+    base_login_url = "https://lms.ccc.edu.ph/app/login.php"
+    post_url = "https://lms.ccc.edu.ph/app/login.php?formSubmitted=true"
 
-    Returns a BeautifulSoup of whatever page we land on after login
-    (should be the dashboard if login succeeded).
-    """
-    # Step 1: load the login page to get the CSRF token
-    resp = session.get(LOGIN_PAGE_URL, headers=HEADERS, timeout=30)
+    # Step 1: GET the initial login page to acquire session cookies and the token
+    resp = session.get(base_login_url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -67,22 +66,32 @@ def log_in(session: requests.Session, username: str, password: str) -> Beautiful
         )
     token = token_input["value"]
 
-    # Step 2: submit the login form using the function's username & password parameters
+    # Step 2: Prepare POST headers with explicit Referer and Content-Type
+    post_headers = HEADERS.copy()
+    post_headers.update(
+        {
+            "Referer": base_login_url,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+    )
+
     payload = {
         "username": username,
         "password": password,
-        "submit": "Login",  # adjust if the real button value differs
+        "submit": "Login",
         "token_login_form": token,
         "agents": AGENTS_VALUE,
     }
+
+    # Step 3: POST credentials
     login_resp = session.post(
-        LOGIN_PAGE_URL, data=payload, headers=HEADERS, timeout=30
+        post_url, data=payload, headers=post_headers, timeout=30
     )
     login_resp.raise_for_status()
 
     dash_soup = BeautifulSoup(login_resp.text, "html.parser")
 
-    # Sanity check: if we're still on a page with a password field, login failed.
+    # Sanity check: verify if the response still renders a password input field
     if dash_soup.find("input", {"name": "password"}):
         raise RuntimeError(
             "Login appears to have failed (still seeing a password field). "
