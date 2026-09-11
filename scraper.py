@@ -10,10 +10,10 @@ and README.md for how these get set as GitHub Secrets):
 
   LMS_USERNAME        - your portal username
   LMS_PASSWORD        - your portal password
-  GMAIL_ADDRESS        - gmail address to send FROM
-  GMAIL_APP_PASSWORD   - gmail app password (not your normal password)
-  NOTIFY_EMAIL         - where to send the notification (can be same as GMAIL_ADDRESS,
-                          or a carrier email-to-SMS gateway address)
+  GMAIL_ADDRESS       - gmail address to send FROM
+  GMAIL_APP_PASSWORD  - gmail app password (not your normal password)
+  NOTIFY_EMAIL        - where to send the notification (can be same as GMAIL_ADDRESS,
+                        or a carrier email-to-SMS gateway address)
 """
 
 import os
@@ -67,10 +67,10 @@ def log_in(session: requests.Session, username: str, password: str) -> Beautiful
         )
     token = token_input["value"]
 
-    # Step 2: submit the login form
+    # Step 2: submit the login form using the function's username & password parameters
     payload = {
-        "username": knrsvlcs,
-        "password": Mariannerose_14,
+        "username": username,
+        "password": password,
         "submit": "Login",  # adjust if the real button value differs
         "token_login_form": token,
         "agents": AGENTS_VALUE,
@@ -132,7 +132,7 @@ def save_state(state: dict) -> None:
         json.dump(state, f, indent=2)
 
 
-def diff_states(old: dict, new: dict) -> list[str]:
+def diff_states(old: dict, new: dict) -> list:
     """Return a list of human-readable change lines."""
     changes = []
     for key, new_info in new.items():
@@ -142,11 +142,8 @@ def diff_states(old: dict, new: dict) -> list[str]:
 
         if isinstance(new_count, int) and isinstance(old_count, int):
             if new_count > old_count:
-                changes.append(
-                    f"{key}: {old_count} -> {new_count} "
-                    f"({new_info['link']})" if new_info["link"] else
-                    f"{key}: {old_count} -> {new_count}"
-                )
+                link_str = f" ({new_info['link']})" if new_info.get("link") else ""
+                changes.append(f"{key}: {old_count} -> {new_count}{link_str}")
     return changes
 
 
