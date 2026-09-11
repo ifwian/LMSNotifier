@@ -1,0 +1,26 @@
+{
+  "DUE TODAY - Activity & Quiz": {
+    "count": 0,
+    "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=DUE_TODAY&type_text=LESSON"
+  },
+  "ASSIGNED - Activity & Quiz": {
+    "count": 0,
+    "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=ASSIGNED&type_text=LESSON"
+  },
+  "DUE TODAY - Assessment": {
+    "count": 0,
+    "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=DUE_TODAY&type_text=EXAM"
+  },
+  "ASSIGNED - Assessment": {
+    "count": 0,
+    "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=ASSIGNED&type_text=EXAM"
+  },
+  "MISSED - Activity, Quiz & Assessment": {
+    "count": 0,
+    "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=MISSED"
+  },
+  "UNREAD - Lessons": {
+    "count": 15,
+    "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=UNREAD&type_text=LESSON"
+  }
+}
