@@ -10,10 +10,10 @@ and README.md for how these get set as GitHub Secrets):
 
   LMS_USERNAME        - your portal username
   LMS_PASSWORD        - your portal password
-  GMAIL_ADDRESS       - gmail address to send FROM
-  GMAIL_APP_PASSWORD  - gmail app password (not your normal password)
-  NOTIFY_EMAIL        - where to send the notification (can be same as GMAIL_ADDRESS,
-                        or a carrier email-to-SMS gateway address)
+  GMAIL_ADDRESS        - gmail address to send FROM
+  GMAIL_APP_PASSWORD   - gmail app password (not your normal password)
+  NOTIFY_EMAIL         - where to send the notification (can be same as GMAIL_ADDRESS,
+                          or a carrier email-to-SMS gateway address)
 """
 
 import os
@@ -49,12 +49,13 @@ HEADERS = {
 
 
 def log_in(session: requests.Session, username: str, password: str) -> BeautifulSoup:
-    """Load the login page, grab the CSRF token, submit credentials."""
-    base_login_url = "https://lms.ccc.edu.ph/app/login.php"
-    post_url = "https://lms.ccc.edu.ph/app/login.php?formSubmitted=true"
+    """Load the login page, grab the CSRF token, submit credentials.
 
-    # Step 1: GET the initial login page to acquire session cookies and the token
-    resp = session.get(base_login_url, headers=HEADERS, timeout=30)
+    Returns a BeautifulSoup of whatever page we land on after login
+    (should be the dashboard if login succeeded).
+    """
+    # Step 1: load the login page to get the CSRF token
+    resp = session.get(LOGIN_PAGE_URL, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -66,36 +67,43 @@ def log_in(session: requests.Session, username: str, password: str) -> Beautiful
         )
     token = token_input["value"]
 
-    # Step 2: Prepare POST headers with explicit Referer and Content-Type
-    post_headers = HEADERS.copy()
-    post_headers.update(
-        {
-            "Referer": base_login_url,
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-    )
-
+    # Step 2: submit the login form
     payload = {
         "username": username,
         "password": password,
-        "submit": "Login",
+        "submit": "Login",  # adjust if the real button value differs
         "token_login_form": token,
         "agents": AGENTS_VALUE,
     }
-
-    # Step 3: POST credentials
     login_resp = session.post(
-        post_url, data=payload, headers=post_headers, timeout=30
+        LOGIN_PAGE_URL, data=payload, headers=HEADERS, timeout=30
     )
     login_resp.raise_for_status()
 
     dash_soup = BeautifulSoup(login_resp.text, "html.parser")
 
-    # Sanity check: verify if the response still renders a password input field
+    # --- Diagnostics: always print these so failed runs are debuggable ---
+    print(f"[debug] POST status code: {login_resp.status_code}")
+    print(f"[debug] Final URL after redirects: {login_resp.url}")
+
+    attempts_text = dash_soup.find(string=lambda t: t and "Login Attempts" in t)
+    if attempts_text:
+        print(f"[debug] Page shows: {attempts_text.strip()}")
+
+    # Look for any element that smells like an error/alert message
+    for el in dash_soup.select(".alert, .error, .text-danger, [class*='alert']"):
+        text = el.get_text(strip=True)
+        if text:
+            print(f"[debug] Possible error message on page: {text}")
+
+    # Sanity check: if we're still on a page with a password field, login failed.
     if dash_soup.find("input", {"name": "password"}):
+        snippet = dash_soup.get_text(" ", strip=True)[:300]
+        print(f"[debug] Page text snippet: {snippet}")
         raise RuntimeError(
             "Login appears to have failed (still seeing a password field). "
-            "Check LMS_USERNAME / LMS_PASSWORD secrets, or the agents/token fields."
+            "Check the [debug] lines above for clues, and verify "
+            "LMS_USERNAME / LMS_PASSWORD secrets, or the agents/token/submit fields."
         )
 
     return dash_soup
@@ -141,7 +149,7 @@ def save_state(state: dict) -> None:
         json.dump(state, f, indent=2)
 
 
-def diff_states(old: dict, new: dict) -> list:
+def diff_states(old: dict, new: dict) -> list[str]:
     """Return a list of human-readable change lines."""
     changes = []
     for key, new_info in new.items():
@@ -151,8 +159,11 @@ def diff_states(old: dict, new: dict) -> list:
 
         if isinstance(new_count, int) and isinstance(old_count, int):
             if new_count > old_count:
-                link_str = f" ({new_info['link']})" if new_info.get("link") else ""
-                changes.append(f"{key}: {old_count} -> {new_count}{link_str}")
+                changes.append(
+                    f"{key}: {old_count} -> {new_count} "
+                    f"({new_info['link']})" if new_info["link"] else
+                    f"{key}: {old_count} -> {new_count}"
+                )
     return changes
 
 
