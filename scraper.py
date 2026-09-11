@@ -25,7 +25,8 @@ from email.mime.text import MIMEText
 import requests
 from bs4 import BeautifulSoup
 
-LOGIN_PAGE_URL = "https://lms.ccc.edu.ph/app/login.php?formSubmitted=true"
+BASE_URL = "https://lms.ccc.edu.ph/"
+LOGIN_POST_URL = "https://lms.ccc.edu.ph/app/login.php?formSubmitted=true"
 STATE_FILE = "state.json"
 
 # The portal expects a JSON blob describing the browser/OS in the "agents"
@@ -33,17 +34,17 @@ STATE_FILE = "state.json"
 AGENTS_VALUE = json.dumps(
     {
         "device": "Chrome",
-        "version": "124.0.0.0",
+        "version": "153.0.0.0",
         "layout": "Blink",
         "os": {"architecture": 64, "family": "Windows", "version": "10"},
-        "description": "Chrome 124.0.0.0 on Windows 10 64-bit",
+        "description": "Chrome 153.0.0.0 on Windows 10 64-bit",
     }
 )
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
     )
 }
 
@@ -54,29 +55,37 @@ def log_in(session: requests.Session, username: str, password: str) -> Beautiful
     Returns a BeautifulSoup of whatever page we land on after login
     (should be the dashboard if login succeeded).
     """
-    # Step 1: load the login page to get the CSRF token
-    resp = session.get(LOGIN_PAGE_URL, headers=HEADERS, timeout=30)
+    # Step 1: load the homepage first (this is what a real browser does) so we
+    # pick up the session cookies (PHPSESSID, lms_sys_ccc) AND the fresh token.
+    resp = session.get(BASE_URL, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
     token_input = soup.find("input", {"name": "token_login_form"})
     if not token_input or not token_input.get("value"):
         raise RuntimeError(
-            "Could not find token_login_form on the login page. "
+            "Could not find token_login_form on the homepage. "
             "The portal's login page structure may have changed."
         )
     token = token_input["value"]
 
-    # Step 2: submit the login form
+    # Step 2: submit the login form to the actual login endpoint, with headers
+    # that mimic the real browser request (Referer/Origin matter here).
     payload = {
         "username": username,
         "password": password,
-        "submit": "Login",  # adjust if the real button value differs
+        "submit": "login",  # lowercase - confirmed from a real browser request
         "token_login_form": token,
         "agents": AGENTS_VALUE,
     }
+    post_headers = {
+        **HEADERS,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://lms.ccc.edu.ph",
+        "Referer": "https://lms.ccc.edu.ph/index.php",
+    }
     login_resp = session.post(
-        LOGIN_PAGE_URL, data=payload, headers=HEADERS, timeout=30
+        LOGIN_POST_URL, data=payload, headers=post_headers, timeout=30
     )
     login_resp.raise_for_status()
 
