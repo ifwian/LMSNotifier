@@ -4,7 +4,7 @@
     "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=DUE_TODAY&type_text=LESSON"
   },
   "ASSIGNED - Activity & Quiz": {
-    "count": 0,
+    "count": 1,
     "link": "https://lms.ccc.edu.ph/app/course_filter.php?filter_text=ASSIGNED&type_text=LESSON"
   },
   "DUE TODAY - Assessment": {
