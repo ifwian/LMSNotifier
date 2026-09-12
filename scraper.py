@@ -27,7 +27,26 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://lms.ccc.edu.ph/"
 LOGIN_POST_URL = "https://lms.ccc.edu.ph/app/login.php?formSubmitted=true"
+COURSE_FILTER_URL = "https://lms.ccc.edu.ph/app/course_filter.php"
+MAIN_STUDENT_URL = "https://lms.ccc.edu.ph/app/main_student.php"
 STATE_FILE = "state.json"
+
+# The dashboard tabs (ASSIGNED / DUE TODAY / MISSED / UNREAD)
+FILTER_TEXTS = ["ASSIGNED", "DUE_TODAY", "MISSED", "UNREAD"]
+
+# The category icons shown on the to-do page. Some of these are guesses based
+# on the legend labels (Assessment, Activity/Quiz, Lesson, Questionnaire,
+# Submit Answer, File Lesson, Link) - a wrong guess just returns no data for
+# that combination, it won't error out.
+TYPE_TEXTS = [
+    "LESSON",
+    "ACTIVITY_QUIZ",
+    "ASSESSMENT",
+    "QUESTIONNAIRE",
+    "SUBMIT_ANSWER",
+    "FILE_LESSON",
+    "LINK",
+]
 
 # The portal expects a JSON blob describing the browser/OS in the "agents"
 # field. Kept in sync with the fake User-Agent below.
@@ -118,32 +137,70 @@ def log_in(session: requests.Session, username: str, password: str) -> Beautiful
     return dash_soup
 
 
-def parse_dashboard_cards(soup: BeautifulSoup) -> dict:
-    """Pull out each summary card's label -> (count, sub-label, link)."""
-    results = {}
+def fetch_items(session: requests.Session, filter_text: str, type_text: str) -> list:
+    """Hit the AJAX endpoint behind one to-do tab/category combo."""
+    ajax_headers = {
+        **HEADERS,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": MAIN_STUDENT_URL,
+    }
+    resp = session.get(
+        COURSE_FILTER_URL,
+        params={"filter_text": filter_text, "type_text": type_text},
+        headers=ajax_headers,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    try:
+        payload = resp.json()
+    except ValueError:
+        print(
+            f"[debug] Non-JSON response for {filter_text}/{type_text}: "
+            f"{resp.text[:200]!r}"
+        )
+        return []
+    return payload.get("data", []) or []
 
-    for card in soup.select(".single_crm.card"):
-        head = card.select_one(".crm_head span")
-        count_el = card.select_one(".crm_body h4")
-        sub_el = card.select_one(".crm_body p")
-        link_el = card.select_one("a.click_me")
 
-        if not head or not count_el:
-            continue
+def gather_all_items(session: requests.Session) -> dict:
+    """Query every filter/type combo and merge results by item id.
 
-        label = head.get_text(strip=True)
-        try:
-            count = int(count_el.get_text(strip=True))
-        except ValueError:
-            count = count_el.get_text(strip=True)
-        sub_label = sub_el.get_text(strip=True) if sub_el else ""
-        link = link_el["href"] if link_el and link_el.has_attr("href") else None
+    Each item remembers which filter categories (ASSIGNED/DUE_TODAY/MISSED/
+    UNREAD) it currently shows up under, since the same item can appear in
+    more than one tab.
+    """
+    items: dict = {}
+    for filt in FILTER_TEXTS:
+        for typ in TYPE_TEXTS:
+            for raw in fetch_items(session, filt, typ):
+                item_id = raw.get("class_exam_id")
+                if not item_id:
+                    continue
+                entry = items.setdefault(
+                    item_id,
+                    {
+                        "title": raw.get("title"),
+                        "mark_type": raw.get("mark_type"),
+                        "from_date": raw.get("from_date"),
+                        "to_date": raw.get("to_date"),
+                        "filters": set(),
+                    },
+                )
+                entry["filters"].add(filt)
+    return items
 
-        # Cards repeat labels (DUE TODAY appears twice: Activity&Quiz, Assessment)
-        key = f"{label} - {sub_label}" if sub_label else label
-        results[key] = {"count": count, "link": link}
 
-    return results
+def to_serializable(items: dict) -> dict:
+    return {
+        str(item_id): {
+            "title": v["title"],
+            "mark_type": v["mark_type"],
+            "to_date": v["to_date"],
+            "filters": sorted(v["filters"]),
+        }
+        for item_id, v in items.items()
+    }
 
 
 def load_previous_state() -> dict:
@@ -158,22 +215,30 @@ def save_state(state: dict) -> None:
         json.dump(state, f, indent=2)
 
 
-def diff_states(old: dict, new: dict) -> list[str]:
-    """Return a list of human-readable change lines."""
-    changes = []
-    for key, new_info in new.items():
-        old_info = old.get(key)
-        old_count = old_info["count"] if old_info else 0
-        new_count = new_info["count"]
+def diff_states(previous: dict, current: dict):
+    """Return (new_items, urgent_items) as lists of (id, info) tuples.
 
-        if isinstance(new_count, int) and isinstance(old_count, int):
-            if new_count > old_count:
-                changes.append(
-                    f"{key}: {old_count} -> {new_count} "
-                    f"({new_info['link']})" if new_info["link"] else
-                    f"{key}: {old_count} -> {new_count}"
-                )
-    return changes
+    new_items: ids that weren't seen last run at all.
+    urgent_items: ids currently under DUE_TODAY or MISSED (whether new or not,
+    so you keep getting reminded until it's resolved).
+    """
+    prev_ids = set(previous.keys())
+    new_items = [
+        (i, v) for i, v in current.items() if i not in prev_ids
+    ]
+    urgent_items = [
+        (i, v)
+        for i, v in current.items()
+        if "DUE_TODAY" in v["filters"] or "MISSED" in v["filters"]
+    ]
+    return new_items, urgent_items
+
+
+def format_item_line(item_id: str, info: dict) -> str:
+    status = "MISSED" if "MISSED" in info["filters"] else (
+        "DUE TODAY" if "DUE_TODAY" in info["filters"] else "ASSIGNED"
+    )
+    return f"- [{status}] {info['title']} ({info['mark_type']}) - due {info['to_date']}"
 
 
 def send_email(subject: str, body: str) -> None:
@@ -196,26 +261,34 @@ def main():
     password = os.environ["LMS_PASSWORD"]
 
     session = requests.Session()
-    dash_soup = log_in(session, username, password)
-    current = parse_dashboard_cards(dash_soup)
+    log_in(session, username, password)
 
-    if not current:
-        print("Warning: no dashboard cards found. Portal layout may have changed.")
-        sys.exit(1)
-
+    items = gather_all_items(session)
+    current = to_serializable(items)
     previous = load_previous_state()
-    changes = diff_states(previous, current)
 
-    print("Current state:", json.dumps(current, indent=2))
+    print("Current items:", json.dumps(current, indent=2))
 
-    if changes:
-        body_lines = ["Your LMS dashboard has new pending items:\n"]
-        body_lines.extend(f"- {c}" for c in changes)
-        body_lines.append("\nCheck: https://lms.ccc.edu.ph/")
-        send_email("LMS: new pending items", "\n".join(body_lines))
+    new_items, urgent_items = diff_states(previous, current)
+    # Avoid double-listing something that's both new AND urgent
+    new_ids = {i for i, _ in new_items}
+    urgent_only = [(i, v) for i, v in urgent_items if i not in new_ids]
+
+    if new_items or urgent_items:
+        lines = []
+        if new_items:
+            lines.append("NEW pending items:")
+            lines.extend(format_item_line(i, v) for i, v in sorted(new_items))
+        if urgent_only:
+            if lines:
+                lines.append("")
+            lines.append("Still needs attention (due today / missed):")
+            lines.extend(format_item_line(i, v) for i, v in sorted(urgent_only))
+        lines.append("\nCheck: https://lms.ccc.edu.ph/")
+        send_email("LMS: pending items", "\n".join(lines))
         print("Sent notification email.")
     else:
-        print("No changes since last run.")
+        print("Nothing new or urgent since last run.")
 
     save_state(current)
 
