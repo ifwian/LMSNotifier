@@ -254,14 +254,125 @@ def diff_states(previous: dict, current: dict):
     return new_items, urgent_items
 
 
+def format_date(raw):
+    """Turn '2026-09-15 23:59:00' into something a student can read at a
+    glance: 'Sep 15, 2026 - 11:59 PM'."""
+    if not raw:
+        return "No date given"
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        formatted = dt.strftime("%b %d, %Y - %I:%M %p")
+        # strip a leading zero from the hour (e.g. "08:00 PM" -> "8:00 PM")
+        return formatted.replace(" 0", " ")
+    except ValueError:
+        return raw
+
+
+STATUS_META = {
+    "MISSED": {"label": "MISSED", "color": "#dc2626"},
+    "DUE TODAY": {"label": "DUE TODAY", "color": "#ea580c"},
+    "ASSIGNED": {"label": "ASSIGNED", "color": "#2563eb"},
+}
+
+
+def item_status(info: dict) -> str:
+    if "MISSED" in info["filters"]:
+        return "MISSED"
+    if "DUE_TODAY" in info["filters"]:
+        return "DUE TODAY"
+    return "ASSIGNED"
+
+
 def format_item_line(item_id: str, info: dict) -> str:
-    status = "MISSED" if "MISSED" in info["filters"] else (
-        "DUE TODAY" if "DUE_TODAY" in info["filters"] else "ASSIGNED"
-    )
-    return f"- [{status}] {info['title']} ({info['mark_type']}) - due {info['to_date']}"
+    status = item_status(info)
+    return f"- [{status}] {info['title']} ({info['mark_type']}) - due {format_date(info['to_date'])}"
 
 
-def send_email(subject: str, body: str) -> None:
+def render_item_row_html(info: dict) -> str:
+    status = item_status(info)
+    meta = STATUS_META[status]
+    return f"""
+    <tr>
+      <td style="padding:14px 16px;border-bottom:1px solid #eef0f2;">
+        <span style="display:inline-block;background:{meta['color']};color:#ffffff;
+          font-size:11px;font-weight:700;letter-spacing:.03em;padding:3px 8px;
+          border-radius:4px;font-family:Arial,sans-serif;">{meta['label']}</span>
+        <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:600;
+          color:#1a1a1a;margin-top:8px;">{info['title']}</div>
+        <div style="font-family:Arial,sans-serif;font-size:13px;color:#6b7280;
+          margin-top:2px;">{info['mark_type'].replace('_', ' ').title()} &middot; Due {format_date(info['to_date'])}</div>
+      </td>
+    </tr>
+    """
+
+
+def render_section_html(title: str, rows_html: str) -> str:
+    return f"""
+    <tr>
+      <td style="padding:24px 24px 8px 24px;font-family:Arial,sans-serif;
+        font-size:13px;font-weight:700;letter-spacing:.04em;color:#374151;
+        text-transform:uppercase;">{title}</td>
+    </tr>
+    <tr>
+      <td style="padding:0 8px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+          style="background:#ffffff;border:1px solid #eef0f2;border-radius:8px;overflow:hidden;">
+          {rows_html}
+        </table>
+      </td>
+    </tr>
+    """
+
+
+def build_email_html(new_items, urgent_only) -> str:
+    sections = ""
+    if new_items:
+        rows = "".join(render_item_row_html(v) for _, v in sorted(new_items))
+        sections += render_section_html("New pending items", rows)
+    if urgent_only:
+        rows = "".join(render_item_row_html(v) for _, v in sorted(urgent_only))
+        sections += render_section_html("Still needs your attention", rows)
+
+    return f"""
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="margin:0;padding:0;background:#f4f5f7;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:32px 0;">
+        <tr>
+          <td align="center">
+            <table role="presentation" width="560" cellpadding="0" cellspacing="0"
+              style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+              <tr>
+                <td style="background:#111827;padding:22px 24px;">
+                  <span style="font-family:Arial,sans-serif;color:#ffffff;font-size:17px;font-weight:700;">
+                    e-GURO Reminder
+                  </span>
+                </td>
+              </tr>
+              {sections}
+              <tr>
+                <td style="padding:20px 24px 28px 24px;">
+                  <a href="https://lms.ccc.edu.ph/" style="display:inline-block;background:#111827;
+                    color:#ffffff;text-decoration:none;font-family:Arial,sans-serif;font-size:14px;
+                    font-weight:600;padding:11px 20px;border-radius:6px;">Open e-GURO &rarr;</a>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:0 24px 20px 24px;font-family:Arial,sans-serif;font-size:11px;color:#9ca3af;">
+                  Sent automatically by your personal LMS checker.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+    """
+
+
+def send_email(subject: str, text_body: str, html_body: str) -> None:
     gmail_address = os.getenv("GMAIL_ADDRESS")
     gmail_app_password = os.getenv("GMAIL_APP_PASSWORD")
     notify_email = os.getenv("NOTIFY_EMAIL", gmail_address)
@@ -269,10 +380,13 @@ def send_email(subject: str, body: str) -> None:
     if not gmail_address or not gmail_app_password:
         raise ValueError("Missing GMAIL_ADDRESS or GMAIL_APP_PASSWORD environment variables.")
 
-    msg = MIMEText(body)
+    from email.mime.multipart import MIMEMultipart
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = gmail_address
     msg["To"] = notify_email
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(gmail_address, gmail_app_password)
@@ -318,7 +432,9 @@ def main():
             lines.append("Still needs attention (due today / missed):")
             lines.extend(format_item_line(i, v) for i, v in sorted(urgent_only))
         lines.append("\nCheck: https://lms.ccc.edu.ph/")
-        send_email("LMS: pending items", "\n".join(lines))
+        text_body = "\n".join(lines)
+        html_body = build_email_html(new_items, urgent_only)
+        send_email("LMS: pending items", text_body, html_body)
         print("Sent notification email.")
     else:
         print("Nothing new or urgent since last run.")
