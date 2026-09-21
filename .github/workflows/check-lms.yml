@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # Needed to commit state.json back to the repository
+    defaults:
+      run:
+        working-directory: notifier  # <-- everything below now runs FROM this folder
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -33,9 +36,13 @@ jobs:
         run: python scraper.py
 
       - name: Commit updated state
+        # This step still needs the FULL path from the repo root, regardless
+        # of working-directory above, since git itself always thinks in
+        # repo-root-relative paths.
+        working-directory: .
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state.json
+          git add notifier/state.json
           git diff --cached --quiet || git commit -m "Update state [skip ci]"
           git push
