@@ -1,3 +1,10 @@
+"""
+e-GURO (CCC LMS) checker.
+
+Logs into the portal, reads the dashboard, compares against last run, and
+emails you when something's new or urgent.
+"""
+
 import os
 import sys
 import json
@@ -24,7 +31,6 @@ TYPE_TEXTS = [
     "LINK",
 ]
 
-# Standard realistic User-Agent (avoid synthetic future versions that trigger bot filters)
 AGENTS_VALUE = json.dumps(
     {
         "device": "Chrome",
@@ -42,23 +48,56 @@ HEADERS = {
     )
 }
 
-def log_in(session: requests.Session, username: str, password: str) -> BeautifulSoup:
+
+# --- Distinct error types, so a failure actually tells you what kind of
+# problem it is instead of one generic "authentication failed" message ---
+
+
+class InvalidCredentialsError(Exception):
+    """The portal's own Login Attempts counter went up - this is a real
+    wrong username/password, not something a code fix can solve."""
+
+
+class PortalStructureError(Exception):
+    """Login was rejected but Login Attempts did NOT increase - this means
+    the request itself was rejected before the portal even checked the
+    password. Common causes: a stale CSRF token, a missing/wrong header, or
+    (importantly) the portal blocking the request based on WHERE it came
+    from - e.g. some school firewalls block traffic from cloud data center
+    IP ranges (which is exactly what GitHub Actions runners use) even
+    though the exact same request from a home internet connection works
+    fine. If this keeps happening despite everything else checking out,
+    that's the most likely explanation, and no header/token tweak fixes it -
+    the local Windows notifier (running from your own home IP) becomes the
+    reliable option instead.
+    """
+
+
+def _extract_login_attempts(soup: BeautifulSoup):
+    import re
+
+    text_node = soup.find(string=lambda t: t and "Login Attempts" in t)
+    if not text_node:
+        return None
+    match = re.search(r"Login Attempts:\s*(\d+)", text_node)
+    return int(match.group(1)) if match else None
+
+
+def _attempt_login_once(session: requests.Session, username: str, password: str):
     try:
         resp = session.get(BASE_URL, headers=HEADERS, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as e:
-        raise RuntimeError(f"Failed to reach LMS homepage (possible IP block or downtime): {e}")
+        raise RuntimeError(f"Failed to reach LMS homepage: {e}")
 
     soup = BeautifulSoup(resp.text, "html.parser")
+    pre_attempts = _extract_login_attempts(soup)
+
     token_input = soup.find("input", {"name": "token_login_form"})
-    
     if not token_input or not token_input.get("value"):
-        print(f"[debug] Response URL: {resp.url}")
-        print(f"[debug] Response Preview: {resp.text[:300]}")
-        raise RuntimeError(
-            "Could not find token_login_form. The LMS may be blocking GitHub Actions IPs or requiring a CAPTCHA."
+        raise PortalStructureError(
+            "Could not find token_login_form on the homepage."
         )
-        
     token = token_input["value"]
 
     payload = {
@@ -74,20 +113,62 @@ def log_in(session: requests.Session, username: str, password: str) -> Beautiful
         "Origin": "https://lms.ccc.edu.ph",
         "Referer": "https://lms.ccc.edu.ph/index.php",
     }
-    
-    login_resp = session.post(
-        LOGIN_POST_URL, data=payload, headers=post_headers, timeout=30
-    )
-    login_resp.raise_for_status()
+    try:
+        login_resp = session.post(
+            LOGIN_POST_URL, data=payload, headers=post_headers, timeout=30
+        )
+        login_resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to submit login: {e}")
 
     dash_soup = BeautifulSoup(login_resp.text, "html.parser")
 
+    print(f"[debug] POST status code: {login_resp.status_code}")
+    print(f"[debug] Final URL after redirects: {login_resp.url}")
+
     if dash_soup.find("input", {"name": "password"}):
-        raise RuntimeError(
-            "LMS Authentication failed. Please verify LMS_USERNAME and LMS_PASSWORD in GitHub Secrets."
+        post_attempts = _extract_login_attempts(dash_soup)
+        print(f"[debug] Login Attempts before: {pre_attempts}, after: {post_attempts}")
+
+        for el in dash_soup.select(".alert, .error, .text-danger, [class*='alert']"):
+            text = el.get_text(strip=True)
+            if text:
+                print(f"[debug] Possible error message on page: {text}")
+
+        snippet = dash_soup.get_text(" ", strip=True)[:300]
+        print(f"[debug] Page text snippet: {snippet}")
+
+        if (
+            pre_attempts is not None
+            and post_attempts is not None
+            and post_attempts > pre_attempts
+        ):
+            raise InvalidCredentialsError(
+                "Portal's Login Attempts counter increased - this is a real "
+                "wrong username/password. Double-check LMS_USERNAME / "
+                "LMS_PASSWORD in GitHub Secrets."
+            )
+
+        raise PortalStructureError(
+            "Login was rejected but Login Attempts did not increase. See "
+            "the [debug] lines above - this is NOT necessarily a wrong "
+            "password."
         )
 
     return dash_soup
+
+
+def log_in(session: requests.Session, username: str, password: str) -> BeautifulSoup:
+    """Logs in, retrying once with a completely fresh token if the first
+    failure looks structural rather than a genuine wrong password."""
+    try:
+        return _attempt_login_once(session, username, password)
+    except PortalStructureError as first_error:
+        print("[debug] First attempt looked structural - retrying once with a fresh token.")
+        try:
+            return _attempt_login_once(session, username, password)
+        except PortalStructureError:
+            raise first_error
 
 
 def fetch_items(session: requests.Session, filter_text: str, type_text: str) -> list:
@@ -113,23 +194,28 @@ def fetch_items(session: requests.Session, filter_text: str, type_text: str) -> 
 
 def gather_all_items(session: requests.Session) -> dict:
     items: dict = {}
+    combo_hits = {}
     for filt in FILTER_TEXTS:
         for typ in TYPE_TEXTS:
-            for raw in fetch_items(session, filt, typ):
+            raw_items = fetch_items(session, filt, typ)
+            if raw_items:
+                combo_hits[f"{filt}/{typ}"] = len(raw_items)
+            for raw in raw_items:
                 item_id = raw.get("class_exam_id")
                 if not item_id:
                     continue
                 entry = items.setdefault(
                     item_id,
                     {
-                        "title": raw.get("title"),
-                        "mark_type": raw.get("mark_type"),
+                        "title": raw.get("title") or "Untitled item",
+                        "mark_type": raw.get("mark_type") or typ,
                         "from_date": raw.get("from_date"),
                         "to_date": raw.get("to_date"),
                         "filters": set(),
                     },
                 )
                 entry["filters"].add(filt)
+    print(f"[debug] Combos with data this run: {combo_hits or 'none'}")
     return items
 
 
@@ -196,12 +282,22 @@ def send_email(subject: str, body: str) -> None:
 def main():
     username = os.getenv("LMS_USERNAME")
     password = os.getenv("LMS_PASSWORD")
-
     if not username or not password:
         sys.exit("Error: LMS_USERNAME or LMS_PASSWORD environment variable is missing.")
 
     session = requests.Session()
-    log_in(session, username, password)
+
+    try:
+        log_in(session, username, password)
+    except InvalidCredentialsError as e:
+        print(f"LOGIN FAILED (wrong credentials): {e}")
+        sys.exit(1)
+    except PortalStructureError as e:
+        print(f"LOGIN FAILED (not a password problem - see debug lines above): {e}")
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"LOGIN FAILED (network/portal issue): {e}")
+        sys.exit(1)
 
     items = gather_all_items(session)
     current = to_serializable(items)
